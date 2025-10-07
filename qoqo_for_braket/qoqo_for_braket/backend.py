@@ -27,8 +27,9 @@ from braket.devices import LocalSimulator
 from braket.ir import openqasm
 from braket.jobs.local import LocalQuantumJob
 from qoqo import Circuit, QuantumProgram
-from qoqo import operations as ops
+from qoqo import operations as ops  # type:ignore
 from qoqo.measurements import ClassicalRegister  # type:ignore
+from qoqo_calculator_pyo3 import CalculatorFloat
 
 from qoqo_for_braket.interface import (
     ionq_verbatim_interface,
@@ -73,6 +74,7 @@ class BraketBackend:
         verbatim_mode: bool = False,
         batch_mode: bool = False,
         use_hybrid_jobs: bool = True,
+        virtual_z_replacement: Optional[bool] = None,
     ) -> None:
         """Initialise the BraketBackend class.
 
@@ -84,6 +86,13 @@ class BraketBackend:
             batch_mode: Run circuits in batch mode when running measurements. \
                     Does not work when circuits define different numbers of shots.
             use_hybrid_jobs: Uses hybrid jobs to run measurements and register measurements.
+            virtual_z_replacement:  On platforms where the RotateXY gate is available and the
+                natural two-qubit gate is diagonal in the Z-basis,
+                it is possible to replace RotateZ gates by virtual changes (rotations)
+                of the qubit basis in the XY-Plane. This is what we implement
+                here. Setting this to True/False will enable the virtual Z replacement with/without
+                the final rotation at the end of the circuit. Leaving this to its default (None) won't
+                use the virtual Z replacement.
 
         """
         self.aws_session = aws_session
@@ -99,6 +108,7 @@ class BraketBackend:
         self.__max_number_shots = 100
         self.batch_mode = batch_mode
         self.use_hybrid_jobs = use_hybrid_jobs
+        self.virtual_z_replacement = virtual_z_replacement
 
         if self.aws_session is not None:
             version = importlib.metadata.version("qoqo-for-braket")
@@ -175,6 +185,30 @@ class BraketBackend:
             length: new maximum allowed length of circuit
         """
         self.__max_circuit_length = length
+
+    def set_virtual_z_replacement(self, replacement: bool) -> None:
+        """Set the virtual Z replacement mode.
+
+        On platforms where the RotateXY gate is available and the
+        natural two-qubit gate is diagonal in the Z-basis,
+        it is possible to replace RotateZ gates by virtual changes (rotations)
+        of the qubit basis in the XY-Plane. This is what we implement
+        here. Setting this to True/False will enable the virtual Z replacement with/without
+        the final rotation at the end of the circuit. Leaving this to its default (None) won't
+        use the virtual Z replacement.
+
+        Args:
+            replacement (Optional[bool]): The virtual Z replacement mode.
+        """
+        self.virtual_z_replacement = replacement
+
+    def get_virtual_z_replacement(self) -> Optional[bool]:
+        """Return the virtual Z replacement mode.
+
+        Returns:
+            The virtual Z replacement mode (True or False)
+        """
+        return self.virtual_z_replacement
 
     def __create_device(self) -> Union[LocalSimulator, AwsDevice]:
         """Creates the device and returns it.
@@ -464,6 +498,8 @@ class BraketBackend:
                   Dict[str, List[List[float]]],
                   Dict[str, List[List[complex]]]]: bit, float and complex registers dictionaries.
         """
+        if self.virtual_z_replacement is not None:
+            circuit, _ = virtual_z_replacement(circuit, {}, self.virtual_z_replacement)
         (quantum_task, metadata, input_bit_circuit) = self._run_circuit(circuit)
         results = quantum_task.result()
         (
@@ -548,12 +584,29 @@ class BraketBackend:
         output_bit_register_dict: Dict[str, List[List[bool]]] = {}
         output_float_register_dict: Dict[str, List[List[float]]] = {}
         output_complex_register_dict: Dict[str, List[List[complex]]] = {}
-        run_circuits = []
-        for circuit in measurement.circuits():
+        if self.virtual_z_replacement is None:
             if constant_circuit is None:
-                run_circuits.append(circuit)
+                run_circuits = measurement.circuits()
             else:
-                run_circuits.append(constant_circuit + circuit)
+                run_circuits = [constant_circuit + circuit for circuit in measurement.circuits()]
+        else:
+            if constant_circuit is None:
+                run_circuits = [
+                    virtual_z_replacement(circuit, {}, self.virtual_z_replacement)[0]
+                    for circuit in measurement.circuits()
+                ]
+            else:
+                new_constant_circuit, constant_rot_map = virtual_z_replacement(
+                    constant_circuit, {}, self.virtual_z_replacement
+                )
+                run_circuits = [
+                    new_constant_circuit
+                    + virtual_z_replacement(circuit, constant_rot_map, self.virtual_z_replacement)[
+                        0
+                    ]
+                    for circuit in measurement.circuits()
+                ]
+
         if self.batch_mode:
             (
                 output_bit_register_dict,
@@ -886,3 +939,162 @@ class BraketBackend:
                 queued_runs.append(self.run_measurement_queued(measurement))
 
         return queued_runs
+
+
+def virtual_z_replacement(
+    circuit: Circuit, rotation_map: Dict[int, CalculatorFloat], apply_final_rz: bool = False
+) -> Tuple[Circuit, Optional[Dict[int, CalculatorFloat]]]:
+    """Replace the Z gate with the virtual Z gate in a quantum circuit.
+
+    It commutes the phase at the end of the circuit.
+    On platforms where the RotateXY gate is available and the
+    natural two-qubit gate is diagonal in the Z-basis,
+    it is possible to replace RotateZ gates by virtual changes (rotations)
+    of the qubit basis in the XY-Plane. This is what we implement
+    here.
+
+    Args:
+        circuit (Circuit): the quantum circuit to replace the Z gate.
+        rotation_map (Dict[int, CalculatorFloat]): The current rotation map containing the phase
+            information of each qubit.
+        apply_final_rz (bool): whether to apply a final Rz gate after the virtual Z gate.
+
+    Returns:
+        Circuit: the quantum circuit with the virtual Z gate replaced.
+        Dict[int, CalculatorFloat]: The updated rotation map.
+    """
+    new_circuit = Circuit()
+    for op in circuit:
+        if "TwoQubitGateOperation" in op.tags():
+            if op.hqslang() in [
+                "ControlledPhaseShift",
+                "ControlledPauliZ",
+                "PhaseShiftedControlledZ",
+                "PhaseShiftedControlledPhase",
+            ]:
+                new_circuit += op
+            else:
+                raise ValueError(
+                    f"All two qubit gates need to be diagonal when virtualZ \
+                        replacement is used.\ngate: {op.hqslang()}"
+                )
+        elif "SingleQubitGateOperation" in op.tags():
+            if op.hqslang() == "RotateZ":
+                update_phase_map(rotation_map, op.qubit(), op.theta())
+            elif op.hqslang() == "PauliZ":
+                update_phase_map(rotation_map, op.qubit(), np.pi)
+            elif op.hqslang() == "RotateX":
+                new_circuit += ops.RotateXY(
+                    op.qubit(), op.theta(), rotation_map.get(op.qubit(), 0.0)
+                )
+            elif op.hqslang() == "RotateY":
+                new_circuit += ops.RotateXY(
+                    op.qubit(), op.theta(), np.pi / 2 + rotation_map.get(op.qubit(), 0.0)
+                )
+            elif op.hqslang() == "PauliX":
+                new_circuit += ops.RotateXY(op.qubit(), np.pi, rotation_map.get(op.qubit(), 0.0))
+            elif op.hqslang() == "PauliY":
+                new_circuit += ops.RotateXY(
+                    op.qubit(), np.pi, np.pi / 2 + rotation_map.get(op.qubit(), 0.0)
+                )
+            elif op.hqslang() in ["SqrtPauliX", "InvSqrtPauliX"]:
+                new_circuit += ops.RotateXY(
+                    op.qubit(), np.pi / 2, rotation_map.get(op.qubit(), 0.0)
+                )
+            elif op.hqslang() == "PhaseShiftState1":
+                update_phase_map(rotation_map, op.qubit(), op.theta())
+            elif op.hqslang() == "PhaseShiftState0":
+                update_phase_map(rotation_map, op.qubit(), -op.theta())
+            elif op.hqslang() == "RotateXY":
+                new_circuit += ops.RotateXY(
+                    op.qubit(), op.theta(), op.phi() + rotation_map.get(op.qubit(), 0.0)
+                )
+            else:
+                raise ValueError(
+                    f"All single qubit gates need to be special cases or RotateZ or RotateXY \
+                        when virtualZ replacement is used.\ngate: {op.hqslang()}"
+                )
+        elif "MultiQubitGateOperation" in op.tags():
+            if op.hqslang() == "MultiQubitZZ":
+                new_circuit += op
+            else:
+                raise ValueError(
+                    f"All multi qubit gates need to be diagonal when virtualZ replacement \
+                        is used.\ngate: {op.hqslang()}"
+                )
+        else:
+            if op.hqslang() == "MeasureQubit":
+                rotation_map[op.qubit()] = 0.0
+                new_circuit += op
+            elif op.hqslang() == "PragmaLoop":
+                try:
+                    n_rep = int(op.repetitions().floor())
+                    for _ in range(n_rep):
+                        new_inner_circuit, new_map = virtual_z_replacement(
+                            op.circuit(), rotation_map, False
+                        )
+                        new_circuit += new_inner_circuit
+                        if new_map is None:
+                            raise ValueError(
+                                "Unexpectedly did not obtain rotation map from virtual rotate \
+                                    z gate optimisation."
+                            )
+                        rotation_map = new_map
+                except ValueError:
+                    for qubit, theta in rotation_map.items():
+                        new_circuit += ops.RotateZ(qubit, theta)
+                    rotation_map = {}
+                    new_inner_circuit, _new_map = virtual_z_replacement(
+                        op.circuit(), rotation_map, True
+                    )
+                    new_circuit += ops.PragmaLoop(op.repetitions(), new_inner_circuit)
+            elif op.hqslang() == "PragmaActiveReset":
+                rotation_map[op.qubit()] = 0.0
+                new_circuit += op
+            elif op.hqslang() == "PragmaConditional":
+                for qubit, theta in rotation_map.items():
+                    new_circuit += ops.RotateZ(qubit, theta)
+                rotation_map = {}
+                new_inner_circuit, _new_map = virtual_z_replacement(
+                    op.circuit(), rotation_map, True
+                )
+                new_circuit += ops.PragmaConditional(
+                    op.condition_register(), op.condition_index(), new_inner_circuit
+                )
+            elif op.hqslang() == "PragmaRepeatedMeasurement":
+                rotation_map = {}
+                new_circuit += op
+            elif op.hqslang() == "PragmaGetStateVector":
+                for qubit, theta in rotation_map.items():
+                    new_circuit += ops.RotateZ(qubit, theta)
+                rotation_map = {}
+                new_circuit += op
+            elif op.hqslang() == "PragmaGetDensityMatrix":
+                for qubit, theta in rotation_map.items():
+                    new_circuit += ops.RotateZ(qubit, theta)
+                rotation_map = {}
+                new_circuit += op
+            else:
+                new_circuit += op
+
+    if apply_final_rz:
+        for qubit, theta in rotation_map.items():
+            new_circuit += ops.RotateZ(qubit, theta)
+
+    final_map = None if apply_final_rz else rotation_map
+    return new_circuit, final_map
+
+
+def update_phase_map(
+    rotation_map: Dict[int, CalculatorFloat], qubit: int, theta: CalculatorFloat
+) -> None:
+    """Updates the rotation map for the given qubit by subtracting the given theta.
+
+    Args:
+        rotation_map (Dict[int, CalculatorFloat]): the map of rotation angles.
+        qubit (int): the qubit to update the map for.
+        theta (CalculatorFloat): the angle to subtract from the rotation map.
+    """
+    if qubit not in rotation_map:
+        rotation_map[qubit] = 0.0
+    rotation_map[qubit] -= theta

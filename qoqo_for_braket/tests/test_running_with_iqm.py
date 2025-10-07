@@ -12,7 +12,7 @@
 """Test running local operation with qasm backend."""
 from qoqo_for_braket import BraketBackend
 from qoqo_for_braket.interface.iqm_verbatim_interface import call_circuit
-from qoqo import Circuit
+from qoqo import Circuit, QuantumProgram, PauliZProductInput, PauliZProduct
 from qoqo import operations as ops
 import pytest
 import sys
@@ -69,6 +69,130 @@ def test_iqm_all_gates() -> None:
     for iqm_measurement in iqm_registers:
         for qubit in iqm_measurement:
             assert qubit == 1 or qubit == 0
+
+
+def test_running_with_virtual_z_replacement() -> None:
+    """Test running with virtual Z replacement."""
+    circuit = Circuit()
+    circuit += ops.DefinitionBit("ro", 2, True)
+    circuit += ops.PauliX(0)
+    circuit += ops.PauliX(1)
+    circuit += ops.PauliZ(1)
+    circuit += ops.PragmaSetNumberOfMeasurements(2, "ro")
+
+    backend = BraketBackend()
+    backend.force_iqm_verbatim()
+    backend.set_virtual_z_replacement(replacement=False)
+    (bit_res, _, _) = backend.run_circuit(circuit)
+    assert "ro" in bit_res.keys()
+    registers = bit_res["ro"]
+
+    print(registers)
+    assert len(registers) == 2
+    assert len(registers[0]) == 2
+    assert registers[0] == [True, True]
+
+
+def test_running_with_virtual_z_replacement_errors() -> None:
+    """Test failing with virtual Z replacement."""
+    circuit = Circuit()
+    circuit += ops.DefinitionBit("ro", 2, True)
+    circuit += ops.InputBit("ro", 1, True)
+    circuit += ops.CNOT(0, 1)
+    circuit += ops.PragmaSetNumberOfMeasurements(2, "ro")
+
+    backend = BraketBackend()
+    backend.force_iqm_verbatim()
+    backend.set_virtual_z_replacement(replacement=False)
+    with pytest.raises(ValueError):
+        backend.run_circuit(circuit)
+
+
+def test_quantum_program_virtual_Z():
+    """Test running quantum program with virtual Z replacement."""
+    backend = BraketBackend()
+    backend.set_virtual_z_replacement(replacement=False)
+    backend.force_iqm_verbatim()
+
+    circuit = Circuit()
+    circuit += ops.DefinitionBit("ro", 2, True)
+    circuit += ops.InputBit("ro", 1, True)
+    circuit += ops.PauliX(0)
+    circuit += ops.RotateZ(0, "angle_0")
+
+    meas_circuit = Circuit()
+    meas_circuit += ops.PragmaSetNumberOfMeasurements(2, "ro")
+
+    measurement_input = PauliZProductInput(1, False)
+    z_basis_index = measurement_input.add_pauliz_product(
+        "ro",
+        [
+            0,
+        ],
+    )
+    measurement_input.add_linear_exp_val(
+        "<H>",
+        {z_basis_index: 0.2},
+    )
+
+    measurement = PauliZProduct(
+        constant_circuit=circuit,
+        circuits=[meas_circuit],
+        input=measurement_input,
+    )
+
+    program = QuantumProgram(
+        measurement=measurement,
+        input_parameter_names=["angle_0"],
+    )
+
+    res = backend.run_program(program=program, params_values=[[1], [2], [3]])
+
+    assert len(res) == 3
+    for el in res:
+        assert float(el["<H>"])
+
+
+def test_quantum_program_virtual_Z_error():
+    """Test failing quantum program with virtual Z replacement."""
+    backend = BraketBackend()
+    backend.set_virtual_z_replacement(replacement=False)
+    backend.force_iqm_verbatim()
+
+    circuit = Circuit()
+    circuit += ops.DefinitionBit("ro", 2, True)
+    circuit += ops.InputBit("ro", 1, True)
+    circuit += ops.CNOT(0, 1)
+    circuit += ops.RotateZ(0, "angle_0")
+
+    meas_circuit = Circuit()
+    meas_circuit += ops.PragmaSetNumberOfMeasurements(2, "ro")
+
+    measurement_input = PauliZProductInput(1, False)
+    z_basis_index = measurement_input.add_pauliz_product(
+        "ro",
+        [
+            0,
+        ],
+    )
+    measurement_input.add_linear_exp_val(
+        "<H>",
+        {z_basis_index: 0.2},
+    )
+
+    measurement = PauliZProduct(
+        constant_circuit=circuit,
+        circuits=[meas_circuit],
+        input=measurement_input,
+    )
+
+    program = QuantumProgram(
+        measurement=measurement,
+        input_parameter_names=["angle_0"],
+    )
+
+    with pytest.raises(ValueError):
+        backend.run_program(program=program, params_values=[[1], [2], [3]])
 
 
 if __name__ == "__main__":
