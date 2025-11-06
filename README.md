@@ -3,6 +3,23 @@
 # qoqo-for-braket
 A braket backend for the qoqo quantum computing toolkit by [HQS Quantum Simulations](https://quantumsimulations.de). The API documentation is available [here](https://hqsquantumsimulations.github.io/qoqo-for-braket/qoqo_for_braket_api/html/generated/qoqo_for_braket.html).
 
+## Running with an AWS account
+
+There are two options to run qoqo-for-braket:
+* Running on the local simulators: this does not require an AWS account and credentials
+* Running on the cloud simulators and hardware: this does require an AWS account and credentials.
+
+Should you want to run qoqo-for-braket code on a cloud-related service, please ensure you have an AWS account. Once you have credentials, please follow [these AWS instructions](https://docs.aws.amazon.com/cli/latest/userguide/cli-chap-getting-started.html) to set up `aws-cli`. 
+
+Should you not have the permissions to install `aws-cli`, you can create the `credentials` file (at `~/.aws/credentials`) with the following structure:
+```markdown
+[default]
+aws_access_key_id = $your_aws_id
+aws_secret_access_key = $your_aws_token
+region = $your_aws_region
+```
+For more information, please see [this AWS link](https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-files.html). For further trouble-shooting, please reach out to AWS directly.
+
 ## Usage on AWS
 
 There are two ways to use this repository to run jobs on AWS Braket: using hybrid jobs and using standard jobs.

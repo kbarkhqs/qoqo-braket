@@ -91,8 +91,8 @@ class BraketBackend:
                 it is possible to replace RotateZ gates by virtual changes (rotations)
                 of the qubit basis in the XY-Plane. This is what we implement
                 here. Setting this to True/False will enable the virtual Z replacement with/without
-                the final rotation at the end of the circuit. Leaving this to its default (None) won't
-                use the virtual Z replacement.
+                the final rotation at the end of the circuit. Leaving this to its default (None)
+                won't use the virtual Z replacement.
 
         """
         self.aws_session = aws_session
@@ -194,8 +194,8 @@ class BraketBackend:
         it is possible to replace RotateZ gates by virtual changes (rotations)
         of the qubit basis in the XY-Plane. This is what we implement
         here. Setting this to True/False will enable the virtual Z replacement with/without
-        the final rotation at the end of the circuit. Leaving this to its default (None) won't
-        use the virtual Z replacement.
+        the final rotation at the end of the circuit. Leaving this to its default (None)
+        won't use the virtual Z replacement.
 
         Args:
             replacement (Optional[bool]): The virtual Z replacement mode.
@@ -599,11 +599,10 @@ class BraketBackend:
                 new_constant_circuit, constant_rot_map = virtual_z_replacement(
                     constant_circuit, {}, self.virtual_z_replacement
                 )
+                rot_map = {} if constant_rot_map is None else constant_rot_map
                 run_circuits = [
                     new_constant_circuit
-                    + virtual_z_replacement(circuit, constant_rot_map, self.virtual_z_replacement)[
-                        0
-                    ]
+                    + virtual_z_replacement(circuit, rot_map, self.virtual_z_replacement)[0]
                     for circuit in measurement.circuits()
                 ]
 

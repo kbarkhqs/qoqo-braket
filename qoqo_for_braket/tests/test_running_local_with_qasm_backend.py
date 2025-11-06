@@ -37,7 +37,7 @@ list_of_operations = [
 ]
 
 
-@pytest.mark.parametrize("device", [None, "braket_sv"])
+@pytest.mark.parametrize("device", [None, "braket_sv", "braket_dm"])
 def test_all_no_device(device: Optional[str]) -> None:
     """Test running simple program."""
     circuit = Circuit()
