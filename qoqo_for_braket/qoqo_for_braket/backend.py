@@ -599,11 +599,10 @@ class BraketBackend:
                 new_constant_circuit, constant_rot_map = virtual_z_replacement(
                     constant_circuit, {}, self.virtual_z_replacement
                 )
+                rot_map = {} if constant_rot_map is None else constant_rot_map
                 run_circuits = [
                     new_constant_circuit
-                    + virtual_z_replacement(circuit, constant_rot_map, self.virtual_z_replacement)[
-                        0
-                    ]
+                    + virtual_z_replacement(circuit, rot_map, self.virtual_z_replacement)[0]
                     for circuit in measurement.circuits()
                 ]
 
